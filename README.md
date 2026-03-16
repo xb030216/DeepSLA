@@ -1,6 +1,3 @@
-***
-
-```markdown
 # DeepSLA: Long-Context Aware Line-Level Vulnerability Detection
 
 > **Note for Reviewers:** This repository is completely anonymized for the double-blind review process. It contains the core implementation of **DeepSLA**, a novel "Freeze-Align-Adapt" paradigm for line-level fault localization using Large Language Models (LLMs).
