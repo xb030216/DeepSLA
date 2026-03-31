@@ -11,6 +11,8 @@ Usage: similar args to original token_line_features.py, plus:
   --segment_max_tokens     : max tokens per segment (default tokenizer.model_max_length)
   --segment_stride_tokens  : overlap tokens between consecutive segments (default 256)
   --max_chars_per_segment  : hard cap on chars to search per segment (safety)
+  --config                 : load arguments from a JSON config file
+  --dump_config            : write the effective arguments to a JSON file
 
 Notes:
   - This implementation does a binary-search on char_end per segment to find the largest
@@ -102,6 +104,49 @@ def write_json_atomic(obj: Any, path: str):
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(obj, f, indent=2, ensure_ascii=False)
     os.replace(tmp, path)
+
+def load_json_config(path: str) -> Dict[str, Any]:
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError(f"Config file must contain a JSON object: {path}")
+    return data
+
+def build_arg_parser(config_defaults: Optional[Dict[str, Any]] = None) -> argparse.ArgumentParser:
+    defaults = config_defaults or {}
+    parser = argparse.ArgumentParser(description="Extract token+line features for adapter training (long-context aware)")
+    parser.add_argument("--config", type=str, default=None, help="Path to a JSON config file. CLI args override config values.")
+    parser.add_argument("--dump_config", type=str, default=None, help="Write the effective arguments to a JSON file, then continue.")
+    parser.add_argument("--print_config", action="store_true", help="Print the effective configuration before running.")
+    parser.add_argument("--model_name", type=str, default=defaults.get("model_name"), required=("model_name" not in defaults), help="HuggingFace model id")
+    parser.add_argument("--csv_path", type=str, default=defaults.get("csv_path"), required=("csv_path" not in defaults), help="CSV with buggyCode and bugLineNum")
+    parser.add_argument("--save_dir", type=str, default=defaults.get("save_dir"), required=("save_dir" not in defaults), help="Directory to save chunked features")
+    parser.add_argument("--chunk_size", type=int, default=defaults.get("chunk_size", 400), help="Rows per chunk")
+    parser.add_argument("--max_length", type=int, default=defaults.get("max_length", 2048), help="(deprecated) tokenizer max length hint")
+    parser.add_argument("--num_last_layers", type=int, default=defaults.get("num_last_layers", 4), help="Number of last layers to fuse")
+    parser.add_argument("--save_layerwise", action="store_true", default=bool(defaults.get("save_layerwise", False)), help="Also save last N layers (very large)")
+    parser.add_argument("--keep_token_hidden", action="store_true", default=bool(defaults.get("keep_token_hidden", True)), help="Save token-level hidden states (default True)")
+    parser.add_argument("--quantize_int8", action="store_true", default=bool(defaults.get("quantize_int8", False)), help="Quantize fused token_hidden to int8 (saves disk but is lossy)")
+    parser.add_argument("--save_line_mean", action="store_true", default=bool(defaults.get("save_line_mean", True)), help="Save per-line mean features")
+    parser.add_argument("--compress", action="store_true", default=bool(defaults.get("compress", False)), help="Use torch zipfile serialization (compressed)")
+    parser.add_argument("--start_chunk", type=int, default=defaults.get("start_chunk", 0), help="Resume from this chunk index")
+    parser.add_argument("--chunks_limit", type=int, default=defaults.get("chunks_limit", -1), help="If >0, stop after this many chunks")
+    parser.add_argument("--device", type=str, default=defaults.get("device"), help="Preferred device (e.g., cuda). If None, use model device_map default")
+    parser.add_argument("--use_8bit", action="store_true", default=bool(defaults.get("use_8bit", False)), help="Load model in 8-bit (bitsandbytes) if supported")
+    parser.add_argument("--max_samples", type=int, default=defaults.get("max_samples", -1), help="For debugging: process at most this many samples overall")
+    parser.add_argument("--progress", action="store_true", default=bool(defaults.get("progress", False)), help="Show tqdm progress")
+    parser.add_argument("--debug", action="store_true", default=bool(defaults.get("debug", False)), help="Enable debug verbosity")
+    parser.add_argument("--segment_max_tokens", type=int, default=defaults.get("segment_max_tokens"), help="Max tokens per segment (default tokenizer.model_max_length)")
+    parser.add_argument("--segment_stride_tokens", type=int, default=defaults.get("segment_stride_tokens", 256), help="Overlap tokens between segments")
+    parser.add_argument("--max_chars_per_segment", type=int, default=defaults.get("max_chars_per_segment", 20000), help="Safety cap on chars scanned per segment")
+    return parser
+
+def effective_args_dict(args: argparse.Namespace) -> Dict[str, Any]:
+    data = vars(args).copy()
+    data.pop("config", None)
+    data.pop("dump_config", None)
+    data.pop("print_config", None)
+    return data
 
 def parse_line_offsets(code: str) -> List[Tuple[int, int]]:
     lines = code.splitlines(keepends=True)
@@ -598,35 +643,38 @@ def extract_chunk_long(
 
 # -------------------- main --------------------
 def main():
-    parser = argparse.ArgumentParser(description="Extract token+line features for adapter training (long-context aware)")
-    parser.add_argument("--model_name", type=str, required=True, help="HuggingFace model id")
-    parser.add_argument("--csv_path", type=str, required=True, help="CSV with buggyCode and bugLineNum")
-    parser.add_argument("--save_dir", type=str, required=True, help="Directory to save chunked features")
-    parser.add_argument("--chunk_size", type=int, default=400, help="Rows per chunk")
-    parser.add_argument("--max_length", type=int, default=2048, help="(deprecated) tokenizer max length hint")
-    parser.add_argument("--num_last_layers", type=int, default=4, help="Number of last layers to fuse")
-    parser.add_argument("--save_layerwise", action="store_true", help="Also save last N layers (very large)")
-    parser.add_argument("--keep_token_hidden", action="store_true", default=True, help="Save token-level hidden states (default True)")
-    parser.add_argument("--quantize_int8", action="store_true", help="Quantize fused token_hidden to int8 (saves disk but is lossy)")
-    parser.add_argument("--save_line_mean", action="store_true", default=True, help="Save per-line mean features")
-    parser.add_argument("--compress", action="store_true", help="Use torch zipfile serialization (compressed)")
-    parser.add_argument("--start_chunk", type=int, default=0, help="Resume from this chunk index")
-    parser.add_argument("--chunks_limit", type=int, default=-1, help="If >0, stop after this many chunks")
-    parser.add_argument("--device", type=str, default=None, help="Preferred device (e.g., cuda). If None, use model device_map default")
-    parser.add_argument("--use_8bit", action="store_true", help="Load model in 8-bit (bitsandbytes) if supported")
-    parser.add_argument("--max_samples", type=int, default=-1, help="For debugging: process at most this many samples overall")
-    parser.add_argument("--progress", action="store_true", help="Show tqdm progress")
-    parser.add_argument("--debug", action="store_true", help="Enable debug verbosity")
-    # long-context specific
-    parser.add_argument("--segment_max_tokens", type=int, default=None, help="Max tokens per segment (default tokenizer.model_max_length)")
-    parser.add_argument("--segment_stride_tokens", type=int, default=256, help="Overlap tokens between segments")
-    parser.add_argument("--max_chars_per_segment", type=int, default=20000, help="Safety cap on chars scanned per segment")
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("--config", type=str, default=None)
+    pre_args, _ = pre_parser.parse_known_args()
+
+    config_defaults = {}
+    if pre_args.config:
+        config_defaults = load_json_config(pre_args.config)
+        logger.info("Loaded config from %s", pre_args.config)
+
+    parser = build_arg_parser(config_defaults)
     args = parser.parse_args()
 
     if args.debug:
         logger.setLevel(logging.DEBUG)
 
     ensure_dir(args.save_dir)
+    effective_config = effective_args_dict(args)
+    effective_config_path = os.path.join(args.save_dir, "effective_config.json")
+
+    if args.print_config:
+        print(json.dumps(effective_config, indent=2, ensure_ascii=False))
+
+    if args.dump_config:
+        dump_parent = os.path.dirname(args.dump_config)
+        if dump_parent:
+            ensure_dir(dump_parent)
+        write_json_atomic(effective_config, args.dump_config)
+        logger.info("Wrote requested config snapshot to %s", args.dump_config)
+
+    write_json_atomic(effective_config, effective_config_path)
+    logger.info("Saved effective config to %s", effective_config_path)
+
     manifest_path = os.path.join(args.save_dir, "manifest.json")
     stats_path = os.path.join(args.save_dir, "extract_stats.json")
     failed_path = os.path.join(args.save_dir, "failed_samples.json")
