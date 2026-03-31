@@ -1,0 +1,20 @@
+{
+  "model_name": "deepseek-ai/deepseek-coder-6.7b-instruct",
+  "jsonl_path": "baseline_model/dataset_hf/val.jsonl",
+  "save_dir": "features_jsonl/val_features",
+  "chunk_size": 400,
+  "num_last_layers": 8,
+  "segment_max_tokens": 4096,
+  "segment_stride_tokens": 256,
+  "max_chars_per_segment": 20000,
+  "progress": true,
+  "compress": false,
+  "use_8bit": false,
+  "save_layerwise": false,
+  "keep_token_hidden": true,
+  "quantize_int8": false,
+  "save_line_mean": true,
+  "start_chunk": 0,
+  "chunks_limit": -1,
+  "max_samples": -1
+}
